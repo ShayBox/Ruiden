@@ -1,0 +1,17 @@
+[package]
+name = "ruiden"
+version = "0.1.0"
+authors = ["Shayne Hartford <shaybox@shaybox.com>"]
+edition = "2021"
+description = "Ruiden RD power supply modbus wrapper"
+readme = "README.md"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+derivative = "2"
+tokio = { version = "1", features = ["macros", "rt"] }
+tokio-modbus = { version = "0.9", default-features = false, features = ["rtu"] }
+tokio-serial = "5"
