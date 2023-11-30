@@ -1,3 +1,5 @@
+use std::array::TryFromSliceError;
+
 use crate::{WordPair, Words};
 
 #[derive(Debug, Default)]
@@ -17,28 +19,32 @@ pub struct HighLowPair(pub u16);
 
 pub struct SerialNumber(pub String);
 
-impl From<Words> for Initialization {
-    fn from(words: Words) -> Self {
-        Self {
+impl TryFrom<Words> for Initialization {
+    type Error = TryFromSliceError;
+
+    fn try_from(words: Words) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: words[0],
-            sn: Into::<SerialNumber>::into((words[1], words[2])).0,
+            sn: Into::<SerialNumber>::into(TryInto::<WordPair>::try_into(&words[0..=1])?).0,
             fw: words[3],
-        }
+        })
     }
 }
 
-impl From<Words> for Information {
-    fn from(words: Words) -> Self {
-        Self {
-            int_c: Into::<HighLowPair>::into((words[0], words[1])).0,
-            int_f: Into::<HighLowPair>::into((words[2], words[3])).0,
-        }
+impl TryFrom<Words> for Information {
+    type Error = TryFromSliceError;
+
+    fn try_from(words: Words) -> Result<Self, Self::Error> {
+        Ok(Self {
+            int_c: Into::<HighLowPair>::into(TryInto::<WordPair>::try_into(&words[0..=1])?).0,
+            int_f: Into::<HighLowPair>::into(TryInto::<WordPair>::try_into(&words[2..=3])?).0,
+        })
     }
 }
 
 impl From<WordPair> for HighLowPair {
-    fn from((high, low): WordPair) -> Self {
-        Self(high.wrapping_shl(16) | low)
+    fn from(words: WordPair) -> Self {
+        Self(words[0].wrapping_shl(16) | words[1])
     }
 }
 

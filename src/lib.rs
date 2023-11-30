@@ -1,6 +1,3 @@
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
-
 use anyhow::{Error, Result};
 use derivative::Derivative;
 use register::Register;
@@ -13,7 +10,7 @@ pub mod serialize;
 
 pub type Word = u16;
 pub type Words = Vec<Word>;
-pub type WordPair = (Word, Word);
+pub type WordPair = [Word; 2];
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -52,7 +49,7 @@ impl Ruiden {
     /// Will return `Err` if `Context::read_multiple` errors
     pub async fn read_high_low(&mut self, register: Register) -> Result<u16> {
         let words = self.read_multiple(register as Address, 2).await?;
-        let word_pair = (words[0], words[1]);
+        let word_pair = TryInto::<WordPair>::try_into(&words[0..=1])?;
         let high_low_pair = Into::<HighLowPair>::into(word_pair);
 
         Ok(high_low_pair.0)
@@ -99,8 +96,8 @@ impl Ruiden {
         let address = Register::ID as Address;
         let quantity = Register::I_RANGE as Address - address + 1;
         let words = self.read_multiple(address, quantity).await?;
-        self.init = Into::<Initialization>::into(words[0..=3].to_vec());
-        self.info = Into::<Information>::into(words[4..].to_vec());
+        self.init = words[0..=3].to_vec().try_into()?;
+        self.info = words[4..].to_vec().try_into()?;
 
         Ok(())
     }
@@ -111,7 +108,7 @@ impl Ruiden {
         let address = Register::ID as Address;
         let quantity = Register::FW as Address - address + 1;
         let words = self.read_multiple(address, quantity).await?;
-        self.init = Into::<Initialization>::into(words);
+        self.init = words.try_into()?;
 
         Ok(&self.init)
     }
@@ -122,7 +119,7 @@ impl Ruiden {
         let address = Register::INT_C_S as Address;
         let quantity = Register::I_RANGE as Address - address + 1;
         let words = self.read_multiple(address, quantity).await?;
-        self.info = Into::<Information>::into(words);
+        self.info = words.try_into()?;
 
         Ok(&self.info)
     }
