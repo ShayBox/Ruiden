@@ -89,12 +89,30 @@ impl Ruiden {
     /// Will return `Err` if `Self::read_one` errors
     pub async fn get_v_set(&mut self) -> Result<f32> {
         let v_set = self.read_one(Register::V_SET).await?;
-        Ok(f32::from(v_set / self.info.v_mul))
+        Ok(f32::from(v_set) / self.info.v_mul)
     }
 
-    // TODO: I_SET
-    // TODO: V_OUT
-    // TODO: I_OUT
+    /// # Errors
+    /// Will return `Err` if `Self::read_one` errors
+    pub async fn get_i_set(&mut self) -> Result<f32> {
+        let i_set = self.read_one(Register::I_SET).await?;
+        Ok(f32::from(i_set) / self.info.i_mul)
+    }
+
+    /// # Errors
+    /// Will return `Err` if `Self::read_one` errors
+    pub async fn get_v_out(&mut self) -> Result<f32> {
+        let v_out = self.read_one(Register::V_OUT).await?;
+        Ok(f32::from(v_out) / self.info.v_mul)
+    }
+
+    /// # Errors
+    /// Will return `Err` if `Self::read_one` errors
+    pub async fn get_i_out(&mut self) -> Result<f32> {
+        let i_out = self.read_one(Register::I_OUT).await?;
+        Ok(f32::from(i_out) / self.info.i_mul)
+    }
+
     // TODO: AH
     // TODO: P_OUT
     // TODO: V_IN
