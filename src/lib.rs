@@ -53,6 +53,7 @@ pub use info::{CvCc, DateTime, Info, Preset, Protection, Status};
 pub use model::Model;
 use register::Register;
 pub use register::{CAL_COMMIT_NVRAM, CMD_REBOOT};
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use tokio::time::{timeout, Duration};
 use tokio_modbus::{client::Context, prelude::*, Address, Quantity};
 use tokio_serial::SerialStream;
@@ -77,11 +78,19 @@ pub const PRESET_SLOTS: u8 = 10;
 /// The [`Self::info`] and [`Self::status`] fields hold the most recently
 /// fetched blocks, refreshed by [`Self::fetch_info`], [`Self::fetch_status`]
 /// and [`Self::update`].
-#[derive(Debug)]
 pub struct Ruiden {
-    ctx:        Context,
-    pub info:   Info,
+    ctx: Context,
+    pub info: Info,
     pub status: Status,
+}
+
+impl Debug for Ruiden {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Ruiden")
+            .field("info", &self.info)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Ruiden {
@@ -601,15 +610,16 @@ impl Ruiden {
                 .write_single_register(Register::SYS_CMD.address(), CMD_REBOOT),
         );
         match write.await {
-            Ok(result) => {
-                // An answered error is unusual but not fatal; the reboot may
-                // still have happened, but surface it so callers can decide.
-                if let Err(err) = result {
-                    bail!("device answered the reboot command with an error: {err}");
-                }
-                Ok(())
+            // A clean `06` echo is fine, and so is no reply at all (the device
+            // usually resets without answering, i.e. the `Elapsed` timeout).
+            Ok(Ok(Ok(()))) | Err(_) => Ok(()),
+            // A Modbus exception or a protocol/transport error in the answer is
+            // unusual but not fatal — the reboot may still have happened — so
+            // surface it and let the caller decide.
+            Ok(Ok(Err(exc))) => {
+                bail!("device answered the reboot command with an exception: {exc}")
             }
-            Err(_) => Ok(()),
+            Ok(Err(err)) => bail!("device answered the reboot command with an error: {err}"),
         }
     }
 
@@ -620,7 +630,7 @@ impl Ruiden {
     /// # Errors
     /// Will return `Err` if the Modbus read fails.
     pub async fn read_words(&mut self, address: Address, quantity: Quantity) -> Result<Words> {
-        Ok(self.ctx.read_holding_registers(address, quantity).await?)
+        Ok(self.ctx.read_holding_registers(address, quantity).await??)
     }
 
     /// Read one holding register.
@@ -656,7 +666,7 @@ impl Ruiden {
     pub async fn write_one(&mut self, register: Register, word: Word) -> Result<()> {
         self.ctx
             .write_single_register(register.address(), word)
-            .await?;
+            .await??;
 
         Ok(())
     }
@@ -666,7 +676,7 @@ impl Ruiden {
     /// # Errors
     /// Will return `Err` if the Modbus write fails.
     pub async fn write_words(&mut self, address: Address, words: &[Word]) -> Result<()> {
-        self.ctx.write_multiple_registers(address, words).await?;
+        self.ctx.write_multiple_registers(address, words).await??;
 
         Ok(())
     }

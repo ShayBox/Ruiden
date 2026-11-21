@@ -13,6 +13,10 @@
 //! Entering flash mode from the application is done over Modbus by writing
 //! [`crate::register::CMD_REBOOT`] to [`crate::Register::SYS_CMD`]; the unit
 //! usually answers with a single `0xFC` byte before resetting, or nothing at all.
+//! The reboot is sent at the application's baud, but the bootloader itself
+//! always comes back at the fixed [`BOOTLOADER_BAUD`] (115200), independent of
+//! that — so [`Bootloader::enter`] reopens the port at 115200 for everything
+//! after the reboot.
 
 use std::{path::Path, time::Duration};
 
@@ -41,10 +45,30 @@ const RSP_READY: &[u8] = b"upredy";
 const RSP_OK: &[u8] = b"OK";
 const RSP_INFO: &[u8] = b"inf";
 
-/// Wait this long for the unit to come back up after a reboot into flash mode.
+/// Baud rate the stock flash bootloader always speaks at.
+///
+/// Unlike the application — whose Modbus baud is user-configurable, up to
+/// `115_200` on the USB interface — the bootloader is hard-wired to `115_200`. A
+/// higher application baud still reboots the unit, but every bootloader command
+/// after that (and an already-flashing unit) must use this rate, or the unit
+/// looks dead. (Ref: the `EEVblog` RD6006 thread — "bootloader uses fixed
+/// baudrate 115200".)
+pub const BOOTLOADER_BAUD: u32 = 115_200;
+
+/// Wait this long after sending the reboot command before polling for the
+/// bootloader (the unit needs a moment to reset and bring its UART back up).
 pub const REBOOT_DELAY: Duration = Duration::from_secs(3);
+/// Overall time to spend waiting for the unit to answer in bootloader mode.
+pub const BOOTLOADER_TIMEOUT: Duration = Duration::from_secs(15);
 /// Wait this long for a bootloader reply before assuming failure.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-attempt read timeout while polling for the bootloader. Kept short so
+/// [`Bootloader::wait_for_bootloader`] can re-send its probe several times
+/// while the unit finishes resetting, instead of one attempt eating the whole
+/// deadline.
+const DETECT_TIMEOUT: Duration = Duration::from_millis(1_000);
+/// Pause between bootloader detection attempts.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// CRC-16/MODBUS, as used by the Modbus RTU frames this module sends raw.
 #[must_use]
@@ -102,13 +126,32 @@ impl Bootloader {
 
     /// Writes a command and reads `len` bytes back, bounded by [`REPLY_TIMEOUT`].
     async fn command(&mut self, cmd: &[u8], len: usize) -> Result<Vec<u8>> {
+        self.try_command(cmd, len, REPLY_TIMEOUT).await
+    }
+
+    /// [`Self::command`] with an explicit reply timeout.
+    async fn try_command(&mut self, cmd: &[u8], len: usize, wait: Duration) -> Result<Vec<u8>> {
         self.stream.write_all(cmd).await?;
         self.stream.flush().await?;
         let mut buf = vec![0u8; len];
-        match timeout(REPLY_TIMEOUT, self.stream.read_exact(&mut buf)).await {
+        match timeout(wait, self.stream.read_exact(&mut buf)).await {
             Ok(Ok(_)) => Ok(buf),
             Ok(Err(e)) => Err(e.into()),
             Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    /// Discards whatever is already sitting in the receive buffer — a framing
+    /// glitch emitted while the MCU reset, the dying application's truncated
+    /// Modbus reply, or a previous attempt's partial response — so those bytes
+    /// cannot shift the next framed read off the start of a reply.
+    async fn drain_input(&mut self) {
+        let mut buf = [0u8; 256];
+        loop {
+            match timeout(Duration::from_millis(50), self.stream.read(&mut buf)).await {
+                Ok(Ok(0) | Err(_)) | Err(_) => break,
+                Ok(Ok(_)) => {}
+            }
         }
     }
 
@@ -117,7 +160,11 @@ impl Bootloader {
     /// # Errors
     /// Will return `Err` on serial I/O failure.
     pub async fn detect(&mut self) -> Result<bool> {
-        Ok(self.command(CMD_DETECT, RSP_BOOT.len()).await? == RSP_BOOT)
+        self.drain_input().await;
+        let res = self
+            .try_command(CMD_DETECT, RSP_BOOT.len(), DETECT_TIMEOUT)
+            .await?;
+        Ok(res == RSP_BOOT)
     }
 
     /// Reads the device identification from the bootloader.
@@ -156,12 +203,17 @@ impl Bootloader {
 
         self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
-        // Drain whatever the dying application sends; ignore timeouts.
-        let _ = timeout(Duration::from_secs(1), self.stream.read_u8()).await;
+        // Drain whatever the dying application sends before it resets (usually a
+        // stray `0xFC`); ignore the timeout, the unit may answer nothing at all.
+        self.drain_input().await;
         Ok(())
     }
 
     /// Waits for the unit to appear in bootloader mode after a reboot.
+    ///
+    /// Polls [`Self::detect`] until the unit answers or `deadline` elapses, so a
+    /// probe sent while the unit is still resetting is retried instead of
+    /// failing the whole update.
     ///
     /// # Errors
     /// Will return `Err` if the bootloader does not answer before the deadline.
@@ -175,7 +227,7 @@ impl Bootloader {
                 started.elapsed() < deadline,
                 "unit did not enter bootloader mode"
             );
-            sleep(Duration::from_millis(500)).await;
+            sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -211,16 +263,37 @@ impl Bootloader {
     /// Opens the port, reboots the unit into flash mode when needed, verifies
     /// the bootloader and returns it, ready for [`Self::flash`].
     ///
+    /// `baud_rate` is the application's Modbus baud, used only to issue the
+    /// reboot. The returned connection always speaks [`BOOTLOADER_BAUD`], so a
+    /// non-default application baud still flashes correctly.
+    ///
     /// # Errors
     /// Will return `Err` if the unit cannot be reached or does not enter
     /// bootloader mode.
     pub async fn enter(port: &str, baud_rate: u32, slave_id: u8) -> Result<Self> {
-        let mut boot = Self::new(port, baud_rate)?;
-        if !boot.detect().await? {
-            boot.reboot(slave_id).await?;
-            sleep(REBOOT_DELAY).await;
-            boot.wait_for_bootloader(REPLY_TIMEOUT).await?;
+        // The bootloader always answers at BOOTLOADER_BAUD, so check for an
+        // already-flashing unit (e.g. one entered by holding ENTER at power-on)
+        // at that rate, not at the application baud.
+        let mut boot = Self::new(port, BOOTLOADER_BAUD)?;
+        if boot.detect().await? {
+            return Ok(boot);
         }
+
+        // Not in flash mode: reboot it over Modbus at the application baud. When
+        // that differs from the bootloader baud, hand the port to a short-lived
+        // handle at the application baud, then take it back at BOOTLOADER_BAUD.
+        if baud_rate == BOOTLOADER_BAUD {
+            boot.reboot(slave_id).await?;
+        } else {
+            drop(boot);
+            let mut app = Self::new(port, baud_rate)?;
+            app.reboot(slave_id).await?;
+            drop(app);
+            boot = Self::new(port, BOOTLOADER_BAUD)?;
+        }
+
+        sleep(REBOOT_DELAY).await;
+        boot.wait_for_bootloader(BOOTLOADER_TIMEOUT).await?;
         Ok(boot)
     }
 

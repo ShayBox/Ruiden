@@ -1,6 +1,6 @@
 [package]
 name = "ruiden"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Shayne Hartford <shaybox@shaybox.com>"]
 edition = "2021"
 description = "Ruiden RD power supply modbus wrapper"
@@ -13,7 +13,7 @@ license = "MIT"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["io-util", "macros", "rt", "time"] }
-tokio-modbus = { version = "0.9", default-features = false, features = ["rtu"] }
+tokio-modbus = { version = "0.17", default-features = false, features = ["rtu"] }
 tokio-serial = "5"
 
 [lints.clippy]
